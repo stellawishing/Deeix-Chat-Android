@@ -1,0 +1,81 @@
+name: Publish 1.0.0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard against replacing an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v1.0.0 >/dev/null 2>&1; then
+            echo "Release v1.0.0 already exists; refusing to generate a different signing key."
+            exit 1
+          fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Generate release signing identity
+        run: |
+          RELEASE_PASSWORD="$(openssl rand -hex 32)"
+          printf '::add-mask::%s\n' "$RELEASE_PASSWORD"
+          printf '%s' "$RELEASE_PASSWORD" > signing-passphrase.txt
+          chmod 600 signing-passphrase.txt
+          keytool -genkeypair -noprompt \
+            -keystore signing.p12 -storetype PKCS12 \
+            -alias deeixchat -keyalg RSA -keysize 3072 -validity 10000 \
+            -dname "CN=Deeix-Chat" \
+            -storepass "$RELEASE_PASSWORD" -keypass "$RELEASE_PASSWORD"
+          chmod 600 signing.p12
+      - name: Build and sign release APK
+        run: |
+          gradle --no-daemon :app:assembleRelease
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f -p 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            app-release-aligned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks signing.p12 --ks-type PKCS12 --ks-key-alias deeixchat \
+            --ks-pass file:signing-passphrase.txt \
+            --key-pass file:signing-passphrase.txt \
+            --out Deeix-Chat-v1.0.0.apk app-release-aligned.apk
+      - name: Verify signed release
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs Deeix-Chat-v1.0.0.apk
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging Deeix-Chat-v1.0.0.apk | grep -E '^package:|^sdkVersion:|^targetSdkVersion:'
+          sha256sum Deeix-Chat-v1.0.0.apk
+      - name: Back up signing identity privately
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deeix-Chat-signing-backup
+          path: |
+            signing.p12
+            signing-passphrase.txt
+          if-no-files-found: error
+          retention-days: 1
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v1.0.0 Deeix-Chat-v1.0.0.apk \
+            --target "$GITHUB_SHA" \
+            --title "Deeix-Chat 1.0.0" \
+            --notes-file RELEASE_NOTES.md

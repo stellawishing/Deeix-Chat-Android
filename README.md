@@ -25,3 +25,15 @@ privately held signing key; do not publish a throwaway-signed release and expect
 future updates to install over it. Android WebView must be available and current
 on the device. Some third-party identity providers disallow signing in from
 embedded browsers, depending on the website's authentication flow.
+
+## Production 1.0.0
+
+The 1.0.0 release workflow generates a production signing identity, signs and
+verifies the release APK, and publishes it to GitHub Releases. The signing identity
+and its random passphrase are available only in a private, one-day Actions artifact
+for safekeeping; they are not committed to the repository or included in the public
+release. Restore that backup before its expiration to sign future updates.
+
+On Android 15 and newer the page respects status bar, cutout, navigation, and
+keyboard insets. On mobile, swiping right from the left edge opens the website's
+own sidebar through its existing control.
