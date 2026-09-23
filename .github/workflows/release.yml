@@ -39,7 +39,8 @@ jobs:
           RELEASE_PASSWORD="$(openssl rand -hex 32)"
           printf '::add-mask::%s\n' "$RELEASE_PASSWORD"
           printf '%s\n' "$RELEASE_PASSWORD" > signing-passphrase.txt
-          chmod 600 signing-passphrase.txt
+          printf '%s\n' "$RELEASE_PASSWORD" > signing-key-passphrase.txt
+          chmod 600 signing-passphrase.txt signing-key-passphrase.txt
           keytool -genkeypair -noprompt \
             -keystore signing.p12 -storetype PKCS12 \
             -alias deeixchat -keyalg RSA -keysize 3072 -validity 10000 \
@@ -55,7 +56,7 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
             --ks signing.p12 --ks-type PKCS12 --ks-key-alias deeixchat \
             --ks-pass file:signing-passphrase.txt \
-            --key-pass file:signing-passphrase.txt \
+            --key-pass file:signing-key-passphrase.txt \
             --out Deeix-Chat-v1.0.0.apk app-release-aligned.apk
       - name: Verify signed release
         run: |
