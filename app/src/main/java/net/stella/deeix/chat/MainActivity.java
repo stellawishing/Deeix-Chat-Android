@@ -9,8 +9,13 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.GeolocationPermissions;
@@ -22,6 +27,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 
 public final class MainActivity extends Activity {
@@ -30,6 +36,9 @@ public final class MainActivity extends Activity {
     private static final int WEB_PERMISSION_REQUEST = 302;
 
     private WebView webView;
+    private float touchStartX;
+    private float touchStartY;
+    private boolean edgeSwipeCandidate;
     private ValueCallback<Uri[]> fileCallback;
     private PermissionRequest pendingWebPermission;
 
@@ -38,10 +47,45 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(Color.rgb(7, 12, 35));
         getWindow().setNavigationBarColor(Color.rgb(7, 12, 35));
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        }
 
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.rgb(7, 12, 35));
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int left;
+            int top;
+            int right;
+            int bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Insets bars = insets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                android.graphics.Insets keyboard = insets.getInsets(WindowInsets.Type.ime());
+                left = bars.left;
+                top = bars.top;
+                right = bars.right;
+                bottom = Math.max(bars.bottom, keyboard.bottom);
+            } else {
+                left = insets.getSystemWindowInsetLeft();
+                top = insets.getSystemWindowInsetTop();
+                right = insets.getSystemWindowInsetRight();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(left, top, right, bottom);
+            return insets;
+        });
         webView = new WebView(this);
         webView.setBackgroundColor(Color.rgb(7, 12, 35));
-        setContentView(webView);
+        root.addView(webView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        setContentView(root);
         configureWebView();
 
         if (savedInstanceState == null) {
@@ -49,6 +93,46 @@ public final class MainActivity extends Activity {
         } else {
             webView.restoreState(savedInstanceState);
         }
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            touchStartX = event.getX();
+            touchStartY = event.getY();
+            edgeSwipeCandidate = touchStartX <= dp(72);
+        } else if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
+                || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            edgeSwipeCandidate = false;
+        } else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+            if (edgeSwipeCandidate
+                    && event.getX() - touchStartX >= dp(88)
+                    && Math.abs(event.getY() - touchStartY) <= dp(64)) {
+                openMobileSidebar();
+            }
+            edgeSwipeCandidate = false;
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
+    private int dp(float value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private void openMobileSidebar() {
+        Uri current = Uri.parse(webView.getUrl() == null ? "" : webView.getUrl());
+        if (!"https".equalsIgnoreCase(current.getScheme())
+                || !"chat.stella-wishing.xyz".equalsIgnoreCase(current.getHost())) {
+            return;
+        }
+        webView.evaluateJavascript(
+                "(function(){"
+                        + "if(!window.matchMedia('(max-width: 767px)').matches)return;"
+                        + "if(document.querySelector('[data-sidebar=\"sidebar\"][data-mobile=\"true\"][data-state=\"open\"]'))return;"
+                        + "var button=document.querySelector('header button[aria-label=\"打开侧边栏\"],header button[aria-label=\"Open sidebar\"]');"
+                        + "if(button){button.click();return;}"
+                        + "window.dispatchEvent(new KeyboardEvent('keydown',{key:'b',ctrlKey:true,bubbles:true}));"
+                        + "})();", null);
     }
 
     private void configureWebView() {
