@@ -261,7 +261,8 @@ public final class MainActivity extends Activity {
             settings.setSafeBrowsingEnabled(true);
         }
         settings.setUserAgentString(settings.getUserAgentString() + " DeeixChat/1.1.0");
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
+        // Do not expose remote debugging in a production APK.
+        WebView.setWebContentsDebuggingEnabled(false);
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
