@@ -41,9 +41,9 @@ recovery, WebView renderer recovery, safer navigation, cache controls,
 configurable HTTPS server addresses, and HTTPS Deep Links. A configured server
 must host a Deeix-compatible web application.
 
-Long-press the safe-area strip above the page to open the native app menu. The
-menu is intentionally outside the website header so it cannot cover the site's
-own buttons.
+Tap the page with two fingers briefly to open the native app menu. The menu is
+intentionally outside the website header so it cannot cover the site's own
+buttons.
 
 On Android 15 and newer the page respects status bar, cutout, navigation, and
 keyboard insets. On mobile, swiping right from the left edge opens the website's
