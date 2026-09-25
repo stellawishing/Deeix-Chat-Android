@@ -1,48 +1,55 @@
-name: Publish release APK
+name: Publish multi-platform release
 
 on:
   push:
-    branches:
-      - 'release/v*'
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+env:
+  JAVA_VERSION: '17'
+  ANDROID_API: '35'
+  BUILD_TOOLS: '35.0.0'
+
 jobs:
-  release:
+  android:
+    name: Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release metadata
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then TAG="${{ inputs.tag }}"; fi
+          VERSION="$(python3 -c 'import json; print(json.load(open("release-config.json"))["version"])')"
+          test "$TAG" = "v$VERSION"
+          test "$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle)" = "$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: ${{ env.JAVA_VERSION }}
       - uses: android-actions/setup-android@v4
         with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          packages: platform-tools platforms;android-${{ env.ANDROID_API }} build-tools;${{ env.BUILD_TOOLS }}
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: Read release version
-        id: version
-        run: |
-          VERSION_NAME="$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle)"
-          test -n "$VERSION_NAME"
-          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
-          if [[ "$GITHUB_REF_NAME" == release/* ]]; then
-            echo "release_tag=${GITHUB_REF_NAME#release/}" >> "$GITHUB_OUTPUT"
-          else
-            echo "release_tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Check tag matches app version
-        env:
-          VERSION_NAME: ${{ steps.version.outputs.version_name }}
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
-        run: test "$RELEASE_TAG" = "v$VERSION_NAME"
-      - name: Prepare persistent signing identity
+      - name: Prepare signing identity
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
@@ -53,34 +60,113 @@ jobs:
           STORE_PASSWORD="$(printf '%s' "$RELEASE_STORE_PASSWORD" | tr -d '\r\n')"
           KEY_ALIAS="$(printf '%s' "$RELEASE_KEY_ALIAS" | tr -d '\r\n')"
           KEY_PASSWORD="$(printf '%s' "$RELEASE_KEY_PASSWORD" | tr -d '\r\n')"
-          test -n "$KEYSTORE_BASE64"
-          test -n "$STORE_PASSWORD"
-          test -n "$KEY_ALIAS"
-          test -n "$KEY_PASSWORD"
+          test -n "$KEYSTORE_BASE64" && test -n "$STORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > signing.p12
           printf '%s' "$STORE_PASSWORD" > signing-passphrase.txt
           printf '%s' "$KEY_PASSWORD" > signing-key-passphrase.txt
           printf '%s' "$KEY_ALIAS" > signing-alias.txt
           chmod 600 signing.p12 signing-passphrase.txt signing-key-passphrase.txt signing-alias.txt
-      - name: Build and sign release
+      - name: Build, align, and sign APK
         env:
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          RELEASE_KEY_ALIAS="$(cat signing-alias.txt)"
           gradle --no-daemon :app:assembleRelease
-          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f -p 4             app/build/outputs/apk/release/app-release-unsigned.apk             app-release-aligned.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign             --ks signing.p12 --ks-type PKCS12 --ks-key-alias "$RELEASE_KEY_ALIAS"             --ks-pass file:signing-passphrase.txt             --key-pass file:signing-key-passphrase.txt             --out "Deeix-Chat-${RELEASE_TAG#v}.apk" app-release-aligned.apk
-      - name: Verify signed release
+          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/zipalign" -f -p 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk app-release-aligned.apk
+          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner" sign \
+            --ks signing.p12 --ks-type PKCS12 --ks-key-alias "$(cat signing-alias.txt)" \
+            --ks-pass file:signing-passphrase.txt --key-pass file:signing-key-passphrase.txt \
+            --out "Deeix-Chat-${VERSION}.apk" app-release-aligned.apk
+          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner" verify --verbose --print-certs "Deeix-Chat-${VERSION}.apk"
+          sha256sum "Deeix-Chat-${VERSION}.apk" > "Deeix-Chat-${VERSION}.apk.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: |
+            Deeix-Chat-${{ steps.version.outputs.version }}.apk
+            Deeix-Chat-${{ steps.version.outputs.version }}.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  ios:
+    name: iOS IPA
+    if: ${{ hashFiles('platforms/ios/DeeixChat.xcodeproj/project.pbxproj') != '' }}
+    runs-on: macos-14
+    needs: android
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build IPA
         run: |
-          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
-          APK="Deeix-Chat-${RELEASE_TAG#v}.apk"
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -E '^package:|^sdkVersion:|^targetSdkVersion:'
-          sha256sum "$APK"
-      - name: Publish GitHub Release
+          echo "The iOS project contract is present. Configure Apple signing and the project scheme before enabling this job."
+          test -n "${{ secrets.IOS_CERTIFICATE_BASE64 }}"
+          test -n "${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}"
+          xcodebuild -project platforms/ios/DeeixChat.xcodeproj -scheme DeeixChat -configuration Release -archivePath build/DeeixChat.xcarchive archive
+          xcodebuild -exportArchive -archivePath build/DeeixChat.xcarchive -exportOptionsPlist platforms/ios/ExportOptions.plist -exportPath build/export
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-release
+          path: build/export/*.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+  harmony:
+    name: HarmonyOS HAP
+    if: ${{ hashFiles('platforms/harmony/DeeixChat/oh-package.json5') != '' }}
+    runs-on: ubuntu-latest
+    needs: android
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build HAP
+        run: |
+          test -x platforms/harmony/DeeixChat/hvigorw
+          platforms/harmony/DeeixChat/hvigorw assembleHap --mode module -p product=default
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harmony-release
+          path: platforms/harmony/DeeixChat/entry/build/default/outputs/default/entry-default-unsigned.hap
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release
+    needs: [android, ios, harmony]
+    if: ${{ always() && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-release'
+          merge-multiple: true
+          path: release-assets
+      - uses: actions/checkout@v4
+      - name: Create release manifest
+        env:
+          TAG: ${{ needs.android.outputs.tag }}
+          VERSION: ${{ needs.android.outputs.version }}
+          IOS_RESULT: ${{ needs.ios.result }}
+          HARMONY_RESULT: ${{ needs.harmony.result }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open('release-config.json', encoding='utf-8') as f:
+              cfg = json.load(f)
+          cfg['releaseTag'] = os.environ['TAG']
+          cfg['version'] = os.environ['VERSION']
+          cfg['ci'] = {
+              'android': 'published',
+              'ios': os.environ['IOS_RESULT'],
+              'harmony': os.environ['HARMONY_RESULT']
+          }
+          with open('release-assets/release-manifest.json', 'w', encoding='utf-8') as f:
+              json.dump(cfg, f, indent=2, ensure_ascii=False)
+              f.write('\n')
+          PY
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          TAG: ${{ needs.android.outputs.tag }}
+          VERSION: ${{ needs.android.outputs.version }}
         run: |
-          APK="Deeix-Chat-${RELEASE_TAG#v}.apk"
-          gh release create "$RELEASE_TAG" "$APK"             --target "$GITHUB_SHA"             --title "Deeix-Chat ${RELEASE_TAG#v}"             --notes-file RELEASE_NOTES.md
+          gh release create "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Deeix-Chat $VERSION" --notes-file RELEASE_NOTES.md

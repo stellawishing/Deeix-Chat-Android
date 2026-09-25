@@ -1,0 +1,12 @@
+{
+  "product": "Deeix-Chat",
+  "version": "1.2.0",
+  "versionCode": 3,
+  "website": "https://chat.stella-wishing.xyz/",
+  "releaseTag": "v1.2.0",
+  "platforms": {
+    "android": { "artifact": "Deeix-Chat-1.2.0.apk", "status": "ready" },
+    "ios": { "artifact": "Deeix-Chat-1.2.0.ipa", "status": "pending-project" },
+    "harmony": { "artifact": "Deeix-Chat-1.2.0.hap", "status": "pending-project" }
+  }
+}

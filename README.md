@@ -1,50 +1,76 @@
-# Deeix-Chat Android
+# Deeix-Chat
 
-Android WebView client for `https://chat.stella-wishing.xyz/`.
+Multi-platform WebView clients for `https://chat.stella-wishing.xyz/`.
 
-The app requires network access: it wraps the live website and does not work offline.
-It supports cookies, file selection, downloads, external app links, and web camera/
-microphone requests. Android asks for those device permissions only when the website
-requests them. Location requests are disabled.
+The Android client is production-ready. iOS and HarmonyOS targets share the same
+website and release metadata, with native platform adapters for permissions, file
+providers, downloads, cookies, safe areas, links, and signing.
 
-## Installable build
+## Repository layout
 
-Every push to `main` builds an installable APK under the Actions run's
-`Deeix-Chat-debug-apk` artifact. Download and extract the artifact ZIP, then
-install `app-debug.apk` on Android 7.0 or newer. For local builds, use JDK 17,
-Android SDK 35, and Gradle 8.7:
-
-```bash
-gradle --no-daemon :app:assembleDebug
+```text
+app/                       Android application module
+platforms/ios/             iOS project contract and future WKWebView target
+platforms/harmony/         HarmonyOS project contract and future ArkTS target
+scripts/deeix-release      Local release CLI
+release-config.json        Single source of version and artifact metadata
+.github/workflows/release  Tag-driven multi-platform release pipeline
 ```
 
-The output is `app/build/outputs/apk/debug/app-debug.apk`.
+`main` is the only long-lived development branch. Production releases start from a
+version tag such as `v1.2.0`; release branches are not required.
 
-This is a debug-signed development build. A production release needs a persistent,
-privately held signing key; do not publish a throwaway-signed release and expect
-future updates to install over it. Android WebView must be available and current
-on the device. Some third-party identity providers disallow signing in from
-embedded browsers, depending on the website's authentication flow.
+## Local CLI
 
-## Production releases
+```bash
+./scripts/deeix-release version
+./scripts/deeix-release check
+./scripts/deeix-release set-version 1.2.0 3
+./scripts/deeix-release android-debug
+./scripts/deeix-release tag
+```
 
-Production releases must use one long-lived signing identity for every update.
-Keep the keystore and its passwords in a private secret store; never generate a
-new key for each update and never commit it to the repository.
+`tag` only creates a local annotated tag. Push it after reviewing the commit:
 
-The release workflow expects these repository secrets: `RELEASE_KEYSTORE_BASE64`,
-`RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, and `RELEASE_KEY_PASSWORD`. Create
-a tag matching `versionName` (for example `v1.1.0`) to publish a release.
+```bash
+git push origin main
+git push origin v1.2.0
+```
 
-Version 1.1.0 adds a status-bar-safe edge-to-edge layout, native network error
-recovery, WebView renderer recovery, safer navigation, cache controls,
-configurable HTTPS server addresses, and HTTPS Deep Links. A configured server
-must host a Deeix-compatible web application.
+## Android
 
-Tap the page with two fingers briefly to open the native app menu. The menu is
-intentionally outside the website header so it cannot cover the site's own
-buttons.
+The Android app requires network access and wraps the live website. It supports
+persistent cookies and DOM storage, file selection, downloads, external links,
+web camera/microphone requests, server configuration, HTTPS Deep Links, safe-area
+insets, loading/error recovery, and renderer recovery. Location requests are disabled.
 
-On Android 15 and newer the page respects status bar, cutout, navigation, and
-keyboard insets. On mobile, swiping right from the left edge opens the website's
-own sidebar through its existing control.
+Build locally with JDK 17, Android SDK 35, and Gradle 8.7:
+
+```bash
+./scripts/deeix-release android-debug
+```
+
+Every push to `main` also builds a debug APK artifact in GitHub Actions. The production
+workflow requires these repository Secrets:
+
+```text
+RELEASE_KEYSTORE_BASE64
+RELEASE_STORE_PASSWORD
+RELEASE_KEY_ALIAS
+RELEASE_KEY_PASSWORD
+```
+
+Keep the v1.1.0 signing backup private. From v1.2.0 onward, every Android update must
+use the same key stored in those Secrets.
+
+## Multi-platform release
+
+Pushing a `v*` tag starts one release pipeline. Android always produces the signed APK.
+The iOS job activates when `platforms/ios/DeeixChat.xcodeproj` exists, and the HarmonyOS
+job activates when `platforms/harmony/DeeixChat/oh-package.json5` exists. This keeps the
+release entry point synchronized while allowing each platform to use its native build
+and signing toolchain.
+
+The first v1.2.0 release is an Android release with iOS and HarmonyOS project contracts
+in place. Add the native projects and their signing credentials before enabling those
+artifacts in the same pipeline.

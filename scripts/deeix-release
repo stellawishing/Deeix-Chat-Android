@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_FILE="$ROOT_DIR/release-config.json"
+ANDROID_GRADLE="$ROOT_DIR/app/build.gradle"
+
+fail() { echo "error: $*" >&2; exit 1; }
+require_file() { [[ -f "$1" ]] || fail "missing file: ${1#$ROOT_DIR/}"; }
+
+config_value() {
+  python3 - "$CONFIG_FILE" "$1" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+value = data
+for part in sys.argv[2].split('.'):
+    value = value[part]
+print(value)
+PY
+}
+
+usage() {
+  cat <<'TXT'
+Usage: scripts/deeix-release <command> [args]
+
+Commands:
+  version                 Print the configured release version and tag.
+  check                  Validate repository version and release metadata.
+  set-version X.Y.Z N   Set versionName to X.Y.Z and Android versionCode to N.
+  android-debug          Build the installable Android debug APK locally.
+  tag                    Create the configured annotated git tag (never pushes).
+  help                   Show this help.
+
+The publish workflow runs from a v* tag. Keep signing keys in GitHub Secrets.
+TXT
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  version)
+    printf 'version=%s\nversionCode=%s\ntag=%s\nwebsite=%s\n' \
+      "$(config_value version)" "$(config_value versionCode)" \
+      "$(config_value releaseTag)" "$(config_value website)"
+    ;;
+  check)
+    require_file "$CONFIG_FILE"
+    require_file "$ANDROID_GRADLE"
+    python3 - "$CONFIG_FILE" "$ANDROID_GRADLE" <<'PY'
+import json, re, sys
+config_path, gradle_path = sys.argv[1:]
+with open(config_path, encoding='utf-8') as f:
+    cfg = json.load(f)
+version = cfg['version']
+code = str(cfg['versionCode'])
+tag = cfg['releaseTag']
+if tag != f'v{version}':
+    raise SystemExit(f'releaseTag must be v{version}, got {tag}')
+with open(gradle_path, encoding='utf-8') as f:
+    gradle = f.read()
+name = re.search(r"versionName '([^']+)'", gradle)
+vc = re.search(r'versionCode (\d+)', gradle)
+if not name or not vc:
+    raise SystemExit('app/build.gradle is missing versionName or versionCode')
+if name.group(1) != version:
+    raise SystemExit(f'Android versionName is {name.group(1)}, expected {version}')
+if vc.group(1) != code:
+    raise SystemExit(f'Android versionCode is {vc.group(1)}, expected {code}')
+print(f'OK: {cfg["product"]} {version} ({tag})')
+PY
+    ;;
+  set-version)
+    version="${2:-}"; code="${3:-}"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must look like X.Y.Z"
+    [[ "$code" =~ ^[1-9][0-9]*$ ]] || fail "versionCode must be a positive integer"
+    python3 - "$CONFIG_FILE" "$ANDROID_GRADLE" "$version" "$code" <<'PY'
+import json, re, sys
+config_path, gradle_path, version, code = sys.argv[1:]
+with open(config_path, encoding='utf-8') as f:
+    cfg = json.load(f)
+cfg['version'] = version
+cfg['versionCode'] = int(code)
+cfg['releaseTag'] = f'v{version}'
+for platform, item in cfg['platforms'].items():
+    ext = {'android': 'apk', 'ios': 'ipa', 'harmony': 'hap'}[platform]
+    item['artifact'] = f'Deeix-Chat-{version}.{ext}'
+with open(config_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+with open(gradle_path, encoding='utf-8') as f:
+    gradle = f.read()
+gradle = re.sub(r"versionCode \d+", f"versionCode {code}", gradle, count=1)
+gradle = re.sub(r"versionName '[^']+'", f"versionName '{version}'", gradle, count=1)
+with open(gradle_path, 'w', encoding='utf-8') as f:
+    f.write(gradle)
+PY
+    echo "Updated to $version (versionCode $code). Run '$0 check' before tagging."
+    ;;
+  android-debug)
+    (cd "$ROOT_DIR" && gradle --no-daemon :app:assembleDebug)
+    ;;
+  tag)
+    (cd "$ROOT_DIR" && "$0" check && git diff --quiet || fail "working tree has changes; commit them before tagging"; git tag -a "$(config_value releaseTag)" -m "Deeix-Chat $(config_value version)")
+    ;;
+  help|-h|--help) usage ;;
+  *) fail "unknown command: $cmd" ;;
+esac

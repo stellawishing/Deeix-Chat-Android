@@ -26,6 +26,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
+      - name: Validate release metadata
+        run: ./scripts/deeix-release check
       - name: Build installable debug APK
         run: gradle --no-daemon :app:assembleDebug
       - name: Verify APK exists
