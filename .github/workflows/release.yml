@@ -49,28 +49,27 @@ jobs:
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          test -n "$RELEASE_KEYSTORE_BASE64"
-          test -n "$RELEASE_STORE_PASSWORD"
-          test -n "$RELEASE_KEY_ALIAS"
-          test -n "$RELEASE_KEY_PASSWORD"
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > signing.p12
-          printf '%s' "$RELEASE_STORE_PASSWORD" > signing-passphrase.txt
-          printf '%s' "$RELEASE_KEY_PASSWORD" > signing-key-passphrase.txt
-          chmod 600 signing.p12 signing-passphrase.txt signing-key-passphrase.txt
+          KEYSTORE_BASE64="$(printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n[:space:]')"
+          STORE_PASSWORD="$(printf '%s' "$RELEASE_STORE_PASSWORD" | tr -d '\r\n')"
+          KEY_ALIAS="$(printf '%s' "$RELEASE_KEY_ALIAS" | tr -d '\r\n')"
+          KEY_PASSWORD="$(printf '%s' "$RELEASE_KEY_PASSWORD" | tr -d '\r\n')"
+          test -n "$KEYSTORE_BASE64"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > signing.p12
+          printf '%s' "$STORE_PASSWORD" > signing-passphrase.txt
+          printf '%s' "$KEY_PASSWORD" > signing-key-passphrase.txt
+          printf '%s' "$KEY_ALIAS" > signing-alias.txt
+          chmod 600 signing.p12 signing-passphrase.txt signing-key-passphrase.txt signing-alias.txt
       - name: Build and sign release
         env:
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
+          RELEASE_KEY_ALIAS="$(cat signing-alias.txt)"
           gradle --no-daemon :app:assembleRelease
-          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f -p 4 \
-            app/build/outputs/apk/release/app-release-unsigned.apk \
-            app-release-aligned.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-            --ks signing.p12 --ks-type PKCS12 --ks-key-alias "$RELEASE_KEY_ALIAS" \
-            --ks-pass file:signing-passphrase.txt \
-            --key-pass file:signing-key-passphrase.txt \
-            --out "Deeix-Chat-${RELEASE_TAG#v}.apk" app-release-aligned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f -p 4             app/build/outputs/apk/release/app-release-unsigned.apk             app-release-aligned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign             --ks signing.p12 --ks-type PKCS12 --ks-key-alias "$RELEASE_KEY_ALIAS"             --ks-pass file:signing-passphrase.txt             --key-pass file:signing-key-passphrase.txt             --out "Deeix-Chat-${RELEASE_TAG#v}.apk" app-release-aligned.apk
       - name: Verify signed release
         run: |
           RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
@@ -84,7 +83,4 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
           APK="Deeix-Chat-${RELEASE_TAG#v}.apk"
-          gh release create "$RELEASE_TAG" "$APK" \
-            --target "$GITHUB_SHA" \
-            --title "Deeix-Chat ${RELEASE_TAG#v}" \
-            --notes-file RELEASE_NOTES.md
+          gh release create "$RELEASE_TAG" "$APK"             --target "$GITHUB_SHA"             --title "Deeix-Chat ${RELEASE_TAG#v}"             --notes-file RELEASE_NOTES.md
