@@ -28,6 +28,7 @@ version tag such as `v1.2.0`; release branches are not required.
 ./scripts/deeix-release set-version 1.2.0 3
 ./scripts/deeix-release android-debug
 ./scripts/deeix-release tag
+./scripts/deeix-release publish
 ```
 
 `tag` only creates a local annotated tag. Push it after reviewing the commit:
@@ -36,6 +37,10 @@ version tag such as `v1.2.0`; release branches are not required.
 git push origin main
 git push origin v1.2.0
 ```
+
+For an authenticated checkout with a clean `main` branch, `publish` performs the
+version check, creates or verifies the annotated tag, pushes `main`, and pushes the
+tag in one step. The tag push starts the GitHub Release workflow.
 
 ## Android
 

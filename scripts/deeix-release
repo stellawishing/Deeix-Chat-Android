@@ -30,6 +30,7 @@ Commands:
   set-version X.Y.Z N   Set versionName to X.Y.Z and Android versionCode to N.
   android-debug          Build the installable Android debug APK locally.
   tag                    Create the configured annotated git tag (never pushes).
+  publish                Validate, tag, and push main plus the release tag.
   help                   Show this help.
 
 The publish workflow runs from a v* tag. Keep signing keys in GitHub Secrets.
@@ -100,7 +101,35 @@ PY
     (cd "$ROOT_DIR" && gradle --no-daemon :app:assembleDebug)
     ;;
   tag)
-    (cd "$ROOT_DIR" && "$0" check && git diff --quiet || fail "working tree has changes; commit them before tagging"; git tag -a "$(config_value releaseTag)" -m "Deeix-Chat $(config_value version)")
+    (
+      cd "$ROOT_DIR"
+      "$0" check
+      [[ -z "$(git status --porcelain --untracked-files=all)" ]] || fail "working tree has changes; commit them before tagging"
+      release_tag="$(config_value releaseTag)"
+      if git show-ref --verify --quiet "refs/tags/$release_tag"; then
+        [[ "$(git rev-list -n 1 "$release_tag^{commit}")" == "$(git rev-parse HEAD)" ]] || fail "$release_tag already exists on a different commit"
+      else
+        git tag -a "$release_tag" -m "Deeix-Chat $(config_value version)"
+      fi
+      echo "Local tag ready: $release_tag"
+    )
+    ;;
+  publish)
+    (
+      cd "$ROOT_DIR"
+      "$0" check
+      [[ "$(git branch --show-current)" == "main" ]] || fail "publish must run from the main branch"
+      [[ -z "$(git status --porcelain --untracked-files=all)" ]] || fail "working tree has changes; commit them before publishing"
+      release_tag="$(config_value releaseTag)"
+      if git show-ref --verify --quiet "refs/tags/$release_tag"; then
+        [[ "$(git rev-list -n 1 "$release_tag^{commit}")" == "$(git rev-parse HEAD)" ]] || fail "$release_tag already exists on a different commit"
+      else
+        git tag -a "$release_tag" -m "Deeix-Chat $(config_value version)"
+      fi
+      git push origin HEAD:main
+      git push origin "refs/tags/$release_tag"
+      echo "Published $release_tag. GitHub Actions will create the release after the tag workflow completes."
+    )
     ;;
   help|-h|--help) usage ;;
   *) fail "unknown command: $cmd" ;;
