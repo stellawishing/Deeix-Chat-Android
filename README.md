@@ -26,13 +26,24 @@ future updates to install over it. Android WebView must be available and current
 on the device. Some third-party identity providers disallow signing in from
 embedded browsers, depending on the website's authentication flow.
 
-## Production 1.0.0
+## Production releases
 
-The 1.0.0 release workflow generates a production signing identity, signs and
-verifies the release APK, and publishes it to GitHub Releases. The signing identity
-and its random passphrase are available only in a private, one-day Actions artifact
-for safekeeping; they are not committed to the repository or included in the public
-release. Restore that backup before its expiration to sign future updates.
+Production releases must use one long-lived signing identity for every update.
+Keep the keystore and its passwords in a private secret store; never generate a
+new key for each update and never commit it to the repository.
+
+The release workflow expects these repository secrets: `RELEASE_KEYSTORE_BASE64`,
+`RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, and `RELEASE_KEY_PASSWORD`. Create
+a tag matching `versionName` (for example `v1.1.0`) to publish a release.
+
+Version 1.1.0 adds a status-bar-safe edge-to-edge layout, native network error
+recovery, WebView renderer recovery, safer navigation, cache controls,
+configurable HTTPS server addresses, and HTTPS Deep Links. A configured server
+must host a Deeix-compatible web application.
+
+Long-press the safe-area strip above the page to open the native app menu. The
+menu is intentionally outside the website header so it cannot cover the site's
+own buttons.
 
 On Android 15 and newer the page respects status bar, cutout, navigation, and
 keyboard insets. On mobile, swiping right from the left edge opens the website's

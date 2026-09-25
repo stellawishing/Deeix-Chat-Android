@@ -1,11 +1,12 @@
 name: Export release APK
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/export-release.yml'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to export (for example v1.1.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,17 +15,17 @@ jobs:
   export:
     runs-on: ubuntu-latest
     steps:
-      - name: Download signed v1.0.0 from GitHub Release
+      - name: Download signed release APK
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          gh release download v1.0.0 \
+          gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern 'Deeix-Chat-v1.0.0.apk'
-          echo "7044faa48b598f14000a5be8fe9604cc1d80044abd98b434278d1a75bf7af275  Deeix-Chat-v1.0.0.apk" | sha256sum -c -
+            --pattern "Deeix-Chat-${RELEASE_TAG#v}.apk"
       - uses: actions/upload-artifact@v4
         with:
-          name: Deeix-Chat-v1.0.0-release-apk
-          path: Deeix-Chat-v1.0.0.apk
+          name: Deeix-Chat-${{ inputs.tag }}-release-apk
+          path: Deeix-Chat-*.apk
           if-no-files-found: error
           retention-days: 7

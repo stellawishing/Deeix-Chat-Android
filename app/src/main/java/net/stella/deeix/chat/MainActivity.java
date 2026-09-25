@@ -2,52 +2,133 @@ package net.stella.deeix.chat;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.webkit.CookieManager;
-import android.webkit.DownloadListener;
 import android.webkit.GeolocationPermissions;
 import android.webkit.MimeTypeMap;
 import android.webkit.PermissionRequest;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Set;
+
 public final class MainActivity extends Activity {
-    private static final String HOME_URL = "https://chat.stella-wishing.xyz/";
+    private static final String DEFAULT_HOME_URL = "https://chat.stella-wishing.xyz/";
+    private static final String PREFS = "deeix_chat_preferences";
+    private static final String PREF_SERVER_URL = "server_url";
+    private static final String PREF_SERVER_URLS = "server_urls";
     private static final int FILE_CHOOSER_REQUEST = 301;
     private static final int WEB_PERMISSION_REQUEST = 302;
+    private static final int STORAGE_PERMISSION_REQUEST = 303;
+    private static final int DARK_BLUE = Color.rgb(7, 12, 35);
+    private static final int SAFE_TOP_COLOR = Color.rgb(11, 18, 48);
 
+    private FrameLayout root;
     private WebView webView;
+    private ProgressBar progressBar;
+    private TextView errorTitle;
+    private TextView errorMessage;
+    private Button errorRetry;
+    private LinearLayout errorPanel;
+    private View topInsetScrim;
+    private int topInset;
     private float touchStartX;
     private float touchStartY;
     private boolean edgeSwipeCandidate;
+    private boolean appMenuGestureCandidate;
+    private long appMenuGestureStart;
     private ValueCallback<Uri[]> fileCallback;
     private PermissionRequest pendingWebPermission;
+    private PendingDownload pendingDownload;
+    private String homeUrl;
+    private String recoveryUrl;
+    private SharedPreferences preferences;
+    private OnBackInvokedCallback backInvokedCallback;
+
+    private static final class PendingDownload {
+        final String url;
+        final String userAgent;
+        final String contentDisposition;
+        final String mimeType;
+
+        PendingDownload(String url, String userAgent, String contentDisposition, String mimeType) {
+            this.url = url;
+            this.userAgent = userAgent;
+            this.contentDisposition = contentDisposition;
+            this.mimeType = mimeType;
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().setStatusBarColor(Color.rgb(7, 12, 35));
-        getWindow().setNavigationBarColor(Color.rgb(7, 12, 35));
+        preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
+        homeUrl = normalizeServerUrl(preferences.getString(PREF_SERVER_URL, DEFAULT_HOME_URL));
+        if (homeUrl == null) homeUrl = DEFAULT_HOME_URL;
+        configureWindow();
+        createRoot();
+        installWebView();
+        installNativeControls();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            backInvokedCallback = this::handleBack;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, backInvokedCallback);
+        }
+
+        if (savedInstanceState != null) {
+            try {
+                webView.restoreState(savedInstanceState);
+            } catch (RuntimeException ignored) {
+                loadInitialIntent();
+            }
+        } else {
+            loadInitialIntent();
+        }
+    }
+
+    private void configureWindow() {
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.TRANSPARENT);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getWindow().setStatusBarContrastEnforced(false);
+            getWindow().setNavigationBarContrastEnforced(false);
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             getWindow().setDecorFitsSystemWindows(false);
         } else {
@@ -56,9 +137,11 @@ public final class MainActivity extends Activity {
                             | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                             | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         }
+    }
 
-        FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.rgb(7, 12, 35));
+    private void createRoot() {
+        root = new FrameLayout(this);
+        root.setBackgroundColor(DARK_BLUE);
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             int left;
             int top;
@@ -78,61 +161,87 @@ public final class MainActivity extends Activity {
                 right = insets.getSystemWindowInsetRight();
                 bottom = insets.getSystemWindowInsetBottom();
             }
-            view.setPadding(left, top, right, bottom);
+            topInset = top;
+            view.setPadding(left, 0, right, bottom);
+            if (topInsetScrim != null) {
+                FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) topInsetScrim.getLayoutParams();
+                params.height = top;
+                topInsetScrim.setLayoutParams(params);
+            }
+            if (progressBar != null) {
+                FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) progressBar.getLayoutParams();
+                params.topMargin = top;
+                progressBar.setLayoutParams(params);
+            }
+            if (webView != null) {
+                webView.setPadding(0, top, 0, 0);
+            }
             return insets;
         });
-        webView = new WebView(this);
-        webView.setBackgroundColor(Color.rgb(7, 12, 35));
-        root.addView(webView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
+    }
+
+    private void installWebView() {
+        webView = new WebView(this);
+        webView.setBackgroundColor(DARK_BLUE);
+        webView.setPadding(0, topInset, 0, 0);
+        root.addView(webView, 0, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
         configureWebView();
-
-        if (savedInstanceState == null) {
-            webView.loadUrl(HOME_URL);
-        } else {
-            webView.restoreState(savedInstanceState);
-        }
     }
 
-    @Override
-    public boolean dispatchTouchEvent(MotionEvent event) {
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-            touchStartX = event.getX();
-            touchStartY = event.getY();
-            edgeSwipeCandidate = touchStartX <= dp(72);
-        } else if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
-                || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-            edgeSwipeCandidate = false;
-        } else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
-            if (edgeSwipeCandidate
-                    && event.getX() - touchStartX >= dp(88)
-                    && Math.abs(event.getY() - touchStartY) <= dp(64)) {
-                openMobileSidebar();
-            }
-            edgeSwipeCandidate = false;
-        }
-        return super.dispatchTouchEvent(event);
-    }
+    private void installNativeControls() {
+        progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progressBar.setMax(100);
+        progressBar.setProgress(0);
+        progressBar.setIndeterminate(false);
+        progressBar.setProgressDrawable(new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{Color.rgb(91, 87, 255), Color.rgb(105, 190, 255)}));
+        FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(3), Gravity.TOP);
+        root.addView(progressBar, progressParams);
 
-    private int dp(float value) {
-        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
-    }
+        topInsetScrim = new View(this);
+        GradientDrawable scrim = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{SAFE_TOP_COLOR, DARK_BLUE});
+        topInsetScrim.setBackground(scrim);
+        FrameLayout.LayoutParams scrimParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, 0, Gravity.TOP);
+        root.addView(topInsetScrim, scrimParams);
 
-    private void openMobileSidebar() {
-        Uri current = Uri.parse(webView.getUrl() == null ? "" : webView.getUrl());
-        if (!"https".equalsIgnoreCase(current.getScheme())
-                || !"chat.stella-wishing.xyz".equalsIgnoreCase(current.getHost())) {
-            return;
-        }
-        webView.evaluateJavascript(
-                "(function(){"
-                        + "if(!window.matchMedia('(max-width: 767px)').matches)return;"
-                        + "if(document.querySelector('[data-sidebar=\"sidebar\"][data-mobile=\"true\"][data-state=\"open\"]'))return;"
-                        + "var button=document.querySelector('header button[aria-label=\"打开侧边栏\"],header button[aria-label=\"Open sidebar\"]');"
-                        + "if(button){button.click();return;}"
-                        + "window.dispatchEvent(new KeyboardEvent('keydown',{key:'b',ctrlKey:true,bubbles:true}));"
-                        + "})();", null);
+        // The status bar consumes touch events, so keep this visual layer passive.
+
+        errorPanel = new LinearLayout(this);
+        errorPanel.setOrientation(LinearLayout.VERTICAL);
+        errorPanel.setGravity(Gravity.CENTER_HORIZONTAL);
+        errorPanel.setPadding(dp(28), dp(24), dp(28), dp(24));
+        errorPanel.setBackgroundColor(DARK_BLUE);
+        errorTitle = new TextView(this);
+        errorTitle.setTextColor(Color.WHITE);
+        errorTitle.setTextSize(20);
+        errorTitle.setGravity(Gravity.CENTER);
+        errorMessage = new TextView(this);
+        errorMessage.setTextColor(Color.rgb(205, 211, 229));
+        errorMessage.setTextSize(15);
+        errorMessage.setGravity(Gravity.CENTER);
+        errorMessage.setPadding(0, dp(10), 0, dp(18));
+        errorRetry = new Button(this);
+        errorRetry.setText("重新加载");
+        errorRetry.setOnClickListener(view -> retryPage());
+        errorPanel.addView(errorTitle, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        errorPanel.addView(errorMessage, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        errorPanel.addView(errorRetry, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        FrameLayout.LayoutParams errorParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+        errorParams.gravity = Gravity.CENTER;
+        root.addView(errorPanel, errorParams);
+        errorPanel.setVisibility(View.GONE);
     }
 
     private void configureWebView() {
@@ -140,15 +249,23 @@ public final class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setAllowFileAccess(true);
+        settings.setAllowFileAccess(false);
+        // Keep content:// access for user-selected uploads; file:// access remains disabled.
         settings.setAllowContentAccess(true);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " DeeixChat/1.0.0");
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            settings.setSafeBrowsingEnabled(true);
+        }
+        settings.setUserAgentString(settings.getUserAgentString() + " DeeixChat/1.1.0");
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
 
-        CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        cookieManager.setAcceptThirdPartyCookies(webView, true);
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -161,18 +278,59 @@ public final class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
                 return handleNavigation(Uri.parse(url));
             }
+
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                Uri page = Uri.parse(url);
+                if (isWebUrl(page) && !isTrustedHost(page)) {
+                    view.stopLoading();
+                    openExternal(page);
+                    return;
+                }
+                errorPanel.setVisibility(View.GONE);
+                progressBar.setVisibility(View.VISIBLE);
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                CookieManager.getInstance().flush();
+                progressBar.setVisibility(View.GONE);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                super.onReceivedError(view, request, error);
+                if (request.isForMainFrame()) {
+                    showError("无法连接 Deeix Chat", "请检查网络连接，或稍后重试。", true);
+                }
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                String current = view.getUrl();
+                replaceWebView();
+                recoveryUrl = current == null ? homeUrl : current;
+                showError("页面需要恢复", "网页进程已退出，可以重新加载当前页面。", true);
+                return true;
+            }
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onProgressChanged(WebView view, int newProgress) {
+                progressBar.setProgress(newProgress);
+                progressBar.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
+            }
+
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
                                              FileChooserParams params) {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = callback;
-                Intent intent;
                 try {
-                    intent = params.createIntent();
-                    startActivityForResult(intent, FILE_CHOOSER_REQUEST);
+                    startActivityForResult(params.createIntent(), FILE_CHOOSER_REQUEST);
                 } catch (ActivityNotFoundException exception) {
                     fileCallback = null;
                     Toast.makeText(MainActivity.this, "未找到文件选择器", Toast.LENGTH_SHORT).show();
@@ -194,54 +352,114 @@ public final class MainActivity extends Activity {
         });
 
         webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) -> {
-            try {
-                DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
-                String fileName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType);
-                request.setMimeType(mimeType == null ? MimeTypeMap.getSingleton()
-                        .getMimeTypeFromExtension(MimeTypeMap.getFileExtensionFromUrl(url)) : mimeType);
-                request.addRequestHeader("User-Agent", userAgent);
-                String cookies = CookieManager.getInstance().getCookie(url);
-                if (cookies != null) request.addRequestHeader("Cookie", cookies);
-                request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
-                ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).enqueue(request);
-                Toast.makeText(this, "已开始下载", Toast.LENGTH_SHORT).show();
-            } catch (Exception exception) {
-                openExternal(Uri.parse(url));
+            PendingDownload download = new PendingDownload(url, userAgent, contentDisposition, mimeType);
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+                    && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    != PackageManager.PERMISSION_GRANTED) {
+                pendingDownload = download;
+                requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                        STORAGE_PERMISSION_REQUEST);
+            } else {
+                enqueueDownload(download);
             }
         });
     }
 
-    private boolean handleNavigation(Uri uri) {
-        String scheme = uri.getScheme();
-        if (scheme == null || "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
-            return false;
+    private void loadInitialIntent() {
+        Intent intent = getIntent();
+        Uri data = intent == null ? null : intent.getData();
+        if (data != null && "deeixchat".equalsIgnoreCase(data.getScheme())
+                && "settings".equalsIgnoreCase(data.getHost())) {
+            webView.loadUrl(homeUrl);
+            showServerDialog(false);
+            return;
         }
+        if (data != null && isTrustedHost(data)) {
+            webView.loadUrl(data.toString());
+        } else {
+            webView.loadUrl(homeUrl);
+        }
+    }
+
+    private boolean handleNavigation(Uri uri) {
+        if (uri == null) return true;
+        String scheme = uri.getScheme();
+        if (isWebUrl(uri)) {
+            if (isTrustedHost(uri)) return false;
+            openExternal(uri);
+            return true;
+        }
+        Uri current = Uri.parse(webView.getUrl() == null ? "" : webView.getUrl());
+        if (!isTrustedHost(current)) return true;
         if ("intent".equalsIgnoreCase(scheme)) {
             try {
                 Intent intent = Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME);
+                if (intent.getComponent() != null) intent.setComponent(null);
+                intent.addCategory(Intent.CATEGORY_BROWSABLE);
                 startActivity(intent);
             } catch (Exception ignored) {
                 Toast.makeText(this, "无法打开外部应用", Toast.LENGTH_SHORT).show();
             }
             return true;
         }
-        openExternal(uri);
+        if ("mailto".equalsIgnoreCase(scheme) || "tel".equalsIgnoreCase(scheme)) {
+            openExternal(uri);
+        }
         return true;
     }
 
-    private void openExternal(Uri uri) {
+    private boolean isWebUrl(Uri uri) {
+        String scheme = uri == null ? null : uri.getScheme();
+        return scheme == null || "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+    }
+
+    private boolean isTrustedHost(Uri uri) {
+        if (uri == null || !"https".equalsIgnoreCase(uri.getScheme())) return false;
+        String host = uri.getHost();
+        Uri configured = Uri.parse(homeUrl == null ? DEFAULT_HOME_URL : homeUrl);
+        String configuredHost = configured.getHost();
+        return host != null && configuredHost != null
+                && configuredHost.equalsIgnoreCase(host)
+                && configured.getPort() == uri.getPort();
+    }
+
+    private void enqueueDownload(PendingDownload download) {
         try {
-            startActivity(new Intent(Intent.ACTION_VIEW, uri));
-        } catch (ActivityNotFoundException exception) {
-            Toast.makeText(this, "没有可处理此链接的应用", Toast.LENGTH_SHORT).show();
+            Uri uri = Uri.parse(download.url);
+            if (!"https".equalsIgnoreCase(uri.getScheme()) && !"http".equalsIgnoreCase(uri.getScheme())) {
+                throw new IllegalArgumentException("Unsupported download scheme");
+            }
+            String fileName = android.webkit.URLUtil.guessFileName(
+                    download.url, download.contentDisposition, download.mimeType);
+            fileName = fileName.replaceAll("[\\\\/:*?\"<>|]", "_");
+            String resolvedMime = download.mimeType;
+            if (resolvedMime == null || resolvedMime.trim().isEmpty()) {
+                resolvedMime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                        MimeTypeMap.getFileExtensionFromUrl(download.url));
+            }
+            DownloadManager.Request request = new DownloadManager.Request(uri);
+            if (resolvedMime != null) request.setMimeType(resolvedMime);
+            if (download.userAgent != null) request.addRequestHeader("User-Agent", download.userAgent);
+            String cookies = CookieManager.getInstance().getCookie(download.url);
+            if (cookies != null) request.addRequestHeader("Cookie", cookies);
+            request.setTitle(fileName);
+            request.setDescription("Deeix Chat 下载");
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            request.setAllowedOverMetered(true);
+            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+            DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager == null) throw new IllegalStateException("DownloadManager unavailable");
+            manager.enqueue(request);
+            Toast.makeText(this, "已开始下载", Toast.LENGTH_SHORT).show();
+        } catch (Exception exception) {
+            Toast.makeText(this, "下载失败，已尝试用浏览器打开", Toast.LENGTH_SHORT).show();
+            openExternal(Uri.parse(download.url));
         }
     }
 
     private void requestWebPermission(PermissionRequest request) {
         Uri origin = Uri.parse(request.getOrigin().toString());
-        if (!"https".equalsIgnoreCase(origin.getScheme())
-                || !"chat.stella-wishing.xyz".equalsIgnoreCase(origin.getHost())) {
+        if (!isTrustedHost(origin)) {
             request.deny();
             return;
         }
@@ -260,7 +478,8 @@ public final class MainActivity extends Activity {
             request.deny();
             return;
         }
-        java.util.ArrayList<String> missing = new java.util.ArrayList<>();
+        if (pendingWebPermission != null) pendingWebPermission.deny();
+        ArrayList<String> missing = new ArrayList<>();
         if (camera && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             missing.add(Manifest.permission.CAMERA);
         }
@@ -275,15 +494,208 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void showAppMenu(View anchor) {
+        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
+        menu.getMenu().add("服务器地址").setOnMenuItemClickListener(item -> {
+            showServerDialog(false);
+            return true;
+        });
+        menu.getMenu().add("重新加载").setOnMenuItemClickListener(item -> {
+            retryPage();
+            return true;
+        });
+        menu.getMenu().add("清除网页缓存").setOnMenuItemClickListener(item -> {
+            webView.clearCache(false);
+            Toast.makeText(this, "网页缓存已清除", Toast.LENGTH_SHORT).show();
+            return true;
+        });
+        menu.getMenu().add("在浏览器中打开").setOnMenuItemClickListener(item -> {
+            openExternal(Uri.parse(webView.getUrl() == null ? homeUrl : webView.getUrl()));
+            return true;
+        });
+        menu.show();
+    }
+
+    private void showServerDialog(boolean firstLaunch) {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(dp(24), dp(8), dp(24), 0);
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint("https://example.com/");
+        input.setText(homeUrl);
+        layout.addView(input, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        Set<String> saved = preferences.getStringSet(PREF_SERVER_URLS, new LinkedHashSet<>());
+        if (!saved.isEmpty()) {
+            TextView label = new TextView(this);
+            label.setText("最近使用");
+            label.setTextColor(Color.GRAY);
+            label.setPadding(0, dp(14), 0, dp(4));
+            layout.addView(label);
+            for (String url : saved) {
+                Button button = new Button(this);
+                button.setText(url);
+                button.setOnClickListener(view -> input.setText(url));
+                layout.addView(button, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            }
+        }
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("服务器地址")
+                .setMessage("必须是提供 Deeix Chat 页面兼容功能的 HTTPS 地址。")
+                .setView(layout)
+                .setNegativeButton(firstLaunch ? "使用默认地址" : "取消", (d, which) -> {
+                    if (firstLaunch) webView.loadUrl(homeUrl);
+                })
+                .setPositiveButton("保存并打开", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            String normalized = normalizeServerUrl(input.getText().toString());
+            if (normalized == null) {
+                input.setError("请输入有效的 HTTPS 地址");
+                return;
+            }
+            homeUrl = normalized;
+            LinkedHashSet<String> urls = new LinkedHashSet<>(preferences.getStringSet(
+                    PREF_SERVER_URLS, new LinkedHashSet<>()));
+            urls.remove(normalized);
+            urls.add(normalized);
+            while (urls.size() > 5) urls.remove(urls.iterator().next());
+            preferences.edit().putString(PREF_SERVER_URL, normalized)
+                    .putStringSet(PREF_SERVER_URLS, urls).apply();
+            dialog.dismiss();
+            replaceWebView();
+            webView.loadUrl(homeUrl);
+        }));
+        dialog.show();
+    }
+
+    private String normalizeServerUrl(String value) {
+        if (value == null) return null;
+        String raw = value.trim();
+        if (raw.isEmpty() || !raw.matches("(?i)^https://.+")) return null;
+        Uri uri;
+        try {
+            uri = Uri.parse(raw);
+        } catch (Exception exception) {
+            return null;
+        }
+        if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null
+                || uri.getUserInfo() != null || uri.getFragment() != null) return null;
+        return raw.endsWith("/") ? raw : raw + "/";
+    }
+
+    private void showError(String title, String message, boolean showRetry) {
+        errorTitle.setText(title);
+        errorMessage.setText(message);
+        errorRetry.setVisibility(showRetry ? View.VISIBLE : View.GONE);
+        progressBar.setVisibility(View.GONE);
+        errorPanel.setVisibility(View.VISIBLE);
+    }
+
+    private void retryPage() {
+        errorPanel.setVisibility(View.GONE);
+        progressBar.setVisibility(View.VISIBLE);
+        if (recoveryUrl != null) {
+            String target = recoveryUrl;
+            recoveryUrl = null;
+            webView.loadUrl(isTrustedHost(Uri.parse(target)) ? target : homeUrl);
+        } else if (webView.getUrl() == null || webView.getUrl().isEmpty()) webView.loadUrl(homeUrl);
+        else webView.reload();
+    }
+
+    private void replaceWebView() {
+        if (webView != null) {
+            root.removeView(webView);
+            webView.stopLoading();
+            webView.destroy();
+        }
+        installWebView();
+    }
+
+    private void openExternal(Uri uri) {
+        if (uri == null) return;
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+        } catch (ActivityNotFoundException exception) {
+            Toast.makeText(this, "没有可处理此链接的应用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            touchStartX = event.getX();
+            touchStartY = event.getY();
+            edgeSwipeCandidate = touchStartX <= dp(72);
+            appMenuGestureCandidate = false;
+        } else if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
+                && event.getPointerCount() == 2) {
+            appMenuGestureCandidate = true;
+            appMenuGestureStart = android.os.SystemClock.uptimeMillis();
+            edgeSwipeCandidate = false;
+        } else if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
+                || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            edgeSwipeCandidate = false;
+            appMenuGestureCandidate = false;
+        } else if (event.getActionMasked() == MotionEvent.ACTION_POINTER_UP
+                && appMenuGestureCandidate
+                && android.os.SystemClock.uptimeMillis() - appMenuGestureStart < 450) {
+            appMenuGestureCandidate = false;
+            showAppMenu(root);
+            return true;
+        } else if (event.getActionMasked() == MotionEvent.ACTION_MOVE
+                && appMenuGestureCandidate && event.getPointerCount() == 2
+                && (Math.abs(event.getX() - touchStartX) > dp(18)
+                || Math.abs(event.getY() - touchStartY) > dp(18))) {
+            appMenuGestureCandidate = false;
+        } else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+            if (edgeSwipeCandidate
+                    && event.getX() - touchStartX >= dp(88)
+                    && Math.abs(event.getY() - touchStartY) <= dp(64)) {
+                openMobileSidebar();
+            }
+            edgeSwipeCandidate = false;
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
+    private void openMobileSidebar() {
+        Uri current = Uri.parse(webView.getUrl() == null ? "" : webView.getUrl());
+        if (!isTrustedHost(current)) return;
+        webView.evaluateJavascript(
+                "(function(){"
+                        + "if(!window.matchMedia('(max-width: 767px)').matches)return;"
+                        + "if(document.querySelector('[data-sidebar=\\\"sidebar\\\"][data-mobile=\\\"true\\\"][data-state=\\\"open\\\"]'))return;"
+                        + "var button=document.querySelector('header button[aria-label=\\\"打开侧边栏\\\"],header button[aria-label=\\\"Open sidebar\\\"]');"
+                        + "if(button){button.click();return;}"
+                        + "window.dispatchEvent(new KeyboardEvent('keydown',{key:'b',ctrlKey:true,bubbles:true}));"
+                        + "})();", null);
+    }
+
+    private int dp(float value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == WEB_PERMISSION_REQUEST && pendingWebPermission != null) {
-            boolean granted = true;
+            boolean granted = grantResults.length > 0;
             for (int result : grantResults) granted &= result == PackageManager.PERMISSION_GRANTED;
             if (granted) pendingWebPermission.grant(pendingWebPermission.getResources());
             else pendingWebPermission.deny();
             pendingWebPermission = null;
+        } else if (requestCode == STORAGE_PERMISSION_REQUEST && pendingDownload != null) {
+            boolean granted = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            PendingDownload download = pendingDownload;
+            pendingDownload = null;
+            if (granted) enqueueDownload(download);
+            else Toast.makeText(this, "没有存储权限，无法保存下载文件", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -298,23 +710,64 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    public void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        Uri data = intent == null ? null : intent.getData();
+        if (data != null && "deeixchat".equalsIgnoreCase(data.getScheme())
+                && "settings".equalsIgnoreCase(data.getHost())) {
+            showServerDialog(false);
+        } else if (data != null && isTrustedHost(data)) {
+            webView.loadUrl(data.toString());
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= TRIM_MEMORY_RUNNING_CRITICAL && webView != null) {
+            webView.clearCache(false);
+        }
+    }
+
+    @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) webView.goBack();
-        else super.onBackPressed();
+        handleBack();
+    }
+
+    private void handleBack() {
+        if (webView != null && webView.canGoBack()) webView.goBack();
+        else finish();
     }
 
     @Override
     protected void onSaveInstanceState(Bundle outState) {
-        webView.saveState(outState);
+        try {
+            if (webView != null) webView.saveState(outState);
+        } catch (RuntimeException ignored) {
+            // A very large WebView history should not prevent Activity state from saving.
+        }
         super.onSaveInstanceState(outState);
     }
 
     @Override
     protected void onDestroy() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backInvokedCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backInvokedCallback);
+            backInvokedCallback = null;
+        }
+        if (fileCallback != null) {
+            fileCallback.onReceiveValue(null);
+            fileCallback = null;
+        }
+        if (pendingWebPermission != null) {
+            pendingWebPermission.deny();
+            pendingWebPermission = null;
+        }
         if (webView != null) {
-            webView.loadUrl("about:blank");
             webView.stopLoading();
             webView.destroy();
+            webView = null;
         }
         super.onDestroy();
     }
